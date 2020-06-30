@@ -1,5 +1,204 @@
 module Blobs
 
-greet() = print("Hello World!")
+using LinearAlgebra
+using StaticArrays
+using Distributions
 
-end # module
+export GaussianKernel, all_modes, KDE, render, FixedRadiusCellList
+
+#### Cell lists. Super simple...
+@inline _bin_idx(x :: Float64, bin_width :: Float64) = ceil(Int64, x/bin_width)
+
+struct FixedRadiusCellList
+    cells :: Dict{NTuple{2, Int64}, Vector{SVector{2, Float64}}}
+    radius :: Float64
+    FixedRadiusCellList(r) = new(Dict(), r)
+end
+
+function Base.push!(t :: FixedRadiusCellList, p :: SVector{2, Float64})
+    i_x = _bin_idx(p[1], t.radius)
+    i_y = _bin_idx(p[2], t.radius)
+    k = (i_x, i_y)
+    list = if k ∉ keys(t.cells)
+        l = SVector{2, Float64}[]
+        t.cells[k] = l
+    else
+        t.cells[k]
+    end
+
+    push!(t.cells[k], p)
+end
+
+function FixedRadiusCellList(points :: Vector{SVector{2, Float64}}, radius :: Float64)
+    t = FixedRadiusCellList(radius)
+    for p in points
+        push!(t, p)
+    end
+    t
+end
+
+function foldl_range_query(op,init, t :: FixedRadiusCellList, p :: SVector{2, Float64})
+    offsets = (-1, 0, 1)
+    i_x = _bin_idx(p[1], t.radius)
+    i_y = _bin_idx(p[2], t.radius)
+    r_sq = t.radius*t.radius
+
+    for o_x in offsets, o_y in offsets
+        k = (i_x + o_x, i_y + o_y)
+        if k ∈ keys(t.cells)
+            for n in t.cells[k]
+                d = p-n
+                if dot(d,d) <= r_sq
+                    init = op(n,init)
+                end
+            end
+        end
+    end
+    init
+end
+
+
+function has_neighbors(t :: FixedRadiusCellList, p :: SVector{2, Float64}, radius :: Float64)
+    r_sq = radius*radius
+    offsets = (-1, 0, 1)
+
+    i_x = _bin_idx(p[1], t.radius)
+    i_y = _bin_idx(p[2], t.radius)
+
+    for o_x in offsets, o_y in offsets
+        k = (i_x + o_x, i_y + o_y)
+        if k ∈ keys(t.cells)
+            for n in t.cells[k]
+                d = p-n
+                if dot(d, d) <= r_sq
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+struct GaussianKernel
+  σ :: Float64
+  precision :: Float64
+  mul :: Float64
+  GaussianKernel(σ) = new(σ, 1.0/(σ^2), (1.0/(2pi*σ^2)))
+end
+
+@inline (g :: GaussianKernel)(z :: Float64) = g.mul*exp(-g.precision*z)
+
+@inline function taylor(g :: GaussianKernel, z :: Float64)
+  k = exp(-g.precision*z)
+  (g.mul*k, -g.mul*g.precision*k, g.mul*g.precision*g.precision*k)
+end
+
+struct KDE
+  K :: GaussianKernel
+  T :: FixedRadiusCellList
+  points :: Vector{SVector{2, Float64}}
+end
+
+KDE(σ :: Float64, points :: Vector{SVector{2, Float64}}, radius = 4*σ) = 
+  KDE(GaussianKernel(σ), FixedRadiusCellList(points, radius), points)
+
+struct KDEEvaluator
+  p :: SVector{2,Float64}
+  K :: GaussianKernel
+end
+
+@inline function (s :: KDEEvaluator)(n :: SVector{2, Float64}, state :: Float64)
+  d = n-s.p
+  state + s.K(0.5*dot(d, d))
+end
+
+@inline (ρ :: KDE)(p :: SVector{2, Float64}) = foldl_range_query(KDEEvaluator(p, ρ.K), 0.0, ρ.T, p)
+@inline (ρ :: KDE)(x :: Float64, y :: Float64) = ρ(SVector(x,y))
+
+struct KDETaylorEvaluator
+  p :: SVector{2,Float64}
+  K :: GaussianKernel
+end
+
+@inline function (k :: KDETaylorEvaluator)(n, (v, g, H))
+  d = k.p-n
+  r_sq = 0.5*dot(d, d)
+  (K, K_p, K_pp)= taylor(k.K, r_sq)
+  (v + K, g + d*K_p, H + K_pp*d*d' + K_p*I)
+end
+
+taylor(ρ :: KDE, x) = foldl_range_query(KDETaylorEvaluator(x,ρ.K), (0.0, SVector(0.0,0.0), SMatrix{2,2}(0.0,0.0,0.0,0.0)), ρ.T, x)
+
+function _newton(ρ :: KDE, x, radius, max_iters, min_v)
+  v = 0.0
+
+  x_zero = x
+  r_sq = radius*radius
+  for i in 1:max_iters
+    (v, g, H) = taylor(ρ, x)
+    d = x-x_zero
+    if v < min_v || dot(d, d) > r_sq
+      return x, v, false
+    end
+    lam, U = eigen(Hermitian(H))
+
+    if lam[1] > 0.0 || lam[2] > 0.0
+      return x, v, false
+    end
+    if norm(g) < 1E-8
+      break
+    end
+    delta = H\g
+    x = x - delta
+  end
+  x, v, true
+end
+
+function all_modes(f :: KDE, min_v, min_peak_radius = f.K.σ,newton_radius = f.K.σ, iters = 20)
+  points = f.points
+  peak_tree = FixedRadiusCellList(SVector{2, Float64}[], min_peak_radius)
+  # This is excessive. Can we not skip points near previous points with low function value?
+  # Using.. e.g. lipschitz bound on gradient or hessian? or just evaluate on a (fine) grid...? duh?
+  for p in points
+    if !has_neighbors(peak_tree, p, min_peak_radius)
+      (x, _, flag) = _newton(f, p, newton_radius, iters, min_v)
+      if flag && !has_neighbors(peak_tree, x, min_peak_radius)
+        push!(peak_tree, x)
+      end
+    end
+  end
+
+  # ugly
+  r = SVector{2, Float64}[]
+  for b in values(peak_tree.cells)
+    append!(r, b)
+  end
+  r
+end
+
+function integrate(f :: KDE, (l_x, u_x), (l_y, u_y))
+    @assert (u_x - l_x) <= f.K.σ*10 && (u_y - l_y) <= f.K.σ*10
+    foldl_range_query(Integrator((l_x, u_x), (l_y, u_y), f.K.σ), 0.0, f.T, SVector((u_x+l_x)/2, (u_y+l_y)/2))
+end
+
+struct Integrator
+    x_bounds :: NTuple{2, Float64}
+    y_bounds :: NTuple{2, Float64}
+    σ :: Float64
+end
+  
+@inline function (s :: Integrator)(n :: SVector{2, Float64}, state :: Float64)
+  d_x = Normal(n[1], s.σ)
+  d_y = Normal(n[2], s.σ)
+  state + (cdf(d_x, s.x_bounds[2]) - cdf(d_x, s.x_bounds[1])) * (cdf(d_y, s.y_bounds[2]) - cdf(d_y, s.y_bounds[1]))
+end
+  
+
+#TODO: This is a terrible way to render an image. 
+# Should loop through points.
+function render(K :: KDE, x_bins, y_bins)
+  [integrate(K, (x_l, x_u), (y_l, y_u)) for (x_l, x_u) in zip(x_bins[2:end], x_bins[1:end]), (y_l, y_u) in zip(y_bins[2:end], y_bins[1:end])]
+end
+
+end
+
