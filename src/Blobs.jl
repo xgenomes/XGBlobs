@@ -4,7 +4,7 @@ using LinearAlgebra
 using StaticArrays
 using Distributions
 
-export GaussianKernel, all_modes, KDE, render, FixedRadiusCellList
+export GaussianKernel, all_modes, KDE, integrate, render, FixedRadiusCellList
 
 #### Cell lists. Super simple...
 @inline _bin_idx(x :: Float64, bin_width :: Float64) = ceil(Int64, x/bin_width)
@@ -99,7 +99,7 @@ struct KDE
   points :: Vector{SVector{2, Float64}}
 end
 
-KDE(σ :: Float64, points :: Vector{SVector{2, Float64}}, radius = 4*σ) = 
+KDE(σ :: Float64, points :: Vector{SVector{2, Float64}}, radius = 4*σ) =
   KDE(GaussianKernel(σ), FixedRadiusCellList(points, radius), points)
 
 struct KDEEvaluator
@@ -154,7 +154,7 @@ function _newton(ρ :: KDE, x, radius, max_iters, min_v)
   x, v, true
 end
 
-function all_modes(f :: KDE, min_v, min_peak_radius = f.K.σ,newton_radius = f.K.σ, iters = 20)
+function all_modes(f :: KDE, min_v, min_peak_radius = f.K.σ,  newton_radius = f.K.σ, iters = 20)
   points = f.points
   peak_tree = FixedRadiusCellList(SVector{2, Float64}[], min_peak_radius)
   # This is excessive. Can we not skip points near previous points with low function value?
@@ -186,19 +186,75 @@ struct Integrator
     y_bounds :: NTuple{2, Float64}
     σ :: Float64
 end
-  
+
 @inline function (s :: Integrator)(n :: SVector{2, Float64}, state :: Float64)
   d_x = Normal(n[1], s.σ)
   d_y = Normal(n[2], s.σ)
   state + (cdf(d_x, s.x_bounds[2]) - cdf(d_x, s.x_bounds[1])) * (cdf(d_y, s.y_bounds[2]) - cdf(d_y, s.y_bounds[1]))
 end
-  
 
-#TODO: This is a terrible way to render an image. 
-# Should loop through points.
-function render(K :: KDE, x_bins, y_bins)
-  [integrate(K, (x_l, x_u), (y_l, y_u)) for (x_l, x_u) in zip(x_bins[2:end], x_bins[1:end]), (y_l, y_u) in zip(y_bins[2:end], y_bins[1:end])]
+render(K :: KDE, x_bins, y_bins) = render_fast(x_bins, y_bins, K.points, K.K.σ, Val(ceil(Int,4*K.K.σ/step(x_bins))))
+
+function render_fast(x_bins, y_bins,  points, sigma, :: Val{N}) where {N}
+  x_tmp = @MVector zeros(2*N+1)
+  y_tmp = @MVector zeros(2*N+1)
+
+  x_view = @MVector zeros(2*N)
+  y_view = @MVector zeros(2*N)
+  img = zeros(length(x_bins), length(y_bins))
+  @inbounds for p in points
+      (x,y) = p
+      (x_idx, y_idx) = searchsortedfirst(x_bins, x), searchsortedfirst(y_bins, y)
+      if N < x_idx < length(x_bins) - N && N < y_idx < length(y_bins) - N
+        for (i,x_i) in enumerate(x_idx -N : x_idx + N)
+          x_tmp[i] = cdf(Normal(x, sigma), x_bins[x_i+1])
+        end
+
+       for (i,x_i) in enumerate(x_idx -N : x_idx + N-1)
+          x_view[i] = x_tmp[i+1]-x_tmp[i]#cdf(Normal(x, sigma), x_bins[x_i+1]) - cdf(Normal(x, sigma), x_bins[x_i]) # duplicated computation
+        end
+
+        for (i,y_i) in enumerate(y_idx -N : y_idx + N)
+          y_tmp[i] = cdf(Normal(y, sigma), y_bins[y_i+1])
+        end
+
+       for (i,y_i) in enumerate(y_idx -N : y_idx + N-1)
+          y_view[i] = y_tmp[i+1]-y_tmp[i]#cdf(Normal(x, sigma), x_bins[x_i+1]) - cdf(Normal(x, sigma), x_bins[x_i]) # duplicated computation
+        end
+
+
+        for (y_v, y_i) in zip(y_view, y_idx -N : y_idx + N-1)
+          for (x_v, x_i) in zip(x_view, x_idx -N : x_idx + N-1)
+            img[x_i, y_i] += x_v * y_v
+          end
+        end
+      end
+  end
+  img
 end
 
-end
 
+# x_view = @MVector zeros(2*N)
+# y_view = @MVector zeros(2*N)
+# img = zeros(length(x_bins), length(y_bins))
+# @inbounds for p in points
+#     (x,y) = p
+#     (x_idx, y_idx) = searchsortedfirst(x_bins, x), searchsortedfirst(y_bins, y)
+#     if N < x_idx < length(x_bins) - N && N < y_idx < length(y_bins) - N
+#      for (i,x_i) in enumerate(x_idx -N : x_idx + N-1)
+#         x_view[i] = cdf(Normal(x, sigma), x_bins[x_i+1]) - cdf(Normal(x, sigma), x_bins[x_i]) # duplicated computation
+#       end
+#       for (i,y_i) in enumerate(y_idx -N : y_idx + N-1)
+#         y_view[i] = cdf(Normal(y, sigma), y_bins[y_i+1]) - cdf(Normal(y, sigma), y_bins[y_i]) # duplicated computation
+#       end
+#       for (y_v, y_i) in zip(y_view, y_idx -N : y_idx + N-1)
+#         for (x_v, x_i) in zip(x_view, x_idx -N : x_idx + N-1)
+#           img[x_i, y_i] += x_v * y_v
+#         end
+#       end
+#     end
+# end
+
+
+
+end
