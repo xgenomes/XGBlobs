@@ -5,6 +5,7 @@ using StaticArrays
 using Distributions
 
 export GaussianKernel, all_modes, KDE, integrate, render, FixedRadiusCellList
+export inner_product, inner_product_offset_gradient
 
 #### Cell lists. Super simple...
 @inline _bin_idx(x :: Float64, bin_width :: Float64) = ceil(Int64, x/bin_width)
@@ -114,6 +115,7 @@ end
 
 @inline (ρ :: KDE)(p :: SVector{2, Float64}) = foldl_range_query(KDEEvaluator(p, ρ.K), 0.0, ρ.T, p)
 @inline (ρ :: KDE)(x :: Float64, y :: Float64) = ρ(SVector(x,y))
+@inline (ρ :: KDE)(v :: Vector{Float64}) = ρ(v[1], v[2])
 
 struct KDETaylorEvaluator
   p :: SVector{2,Float64}
@@ -195,66 +197,113 @@ end
 
 render(K :: KDE, x_bins, y_bins) = render_fast(x_bins, y_bins, K.points, K.K.σ, Val(ceil(Int,4*K.K.σ/step(x_bins))))
 
-function render_fast(x_bins, y_bins,  points, sigma, :: Val{N}) where {N}
-  x_tmp = @MVector zeros(2*N+1)
-  y_tmp = @MVector zeros(2*N+1)
+function render_fast(x_bins, y_bins, points, sigma, ::Val{N}) where {N}
+  x_tmp = @MVector zeros(2 * N + 1)
+  y_tmp = @MVector zeros(2 * N + 1)
 
-  x_view = @MVector zeros(2*N)
-  y_view = @MVector zeros(2*N)
+  x_view = @MVector zeros(2 * N)
+  y_view = @MVector zeros(2 * N)
   img = zeros(length(x_bins), length(y_bins))
   @inbounds for p in points
-      (x,y) = p
-      (x_idx, y_idx) = searchsortedfirst(x_bins, x), searchsortedfirst(y_bins, y)
-      if N < x_idx < length(x_bins) - N && N < y_idx < length(y_bins) - N
-        for (i,x_i) in enumerate(x_idx -N : x_idx + N)
-          x_tmp[i] = cdf(Normal(x, sigma), x_bins[x_i+1])
-        end
+    (x, y) = p
+    (x_idx, y_idx) = searchsortedfirst(x_bins, x), searchsortedfirst(y_bins, y)
+    if N < x_idx < length(x_bins) - N && N < y_idx < length(y_bins) - N
+      for (i, x_i) in enumerate(x_idx-N:x_idx+N)
+        x_tmp[i] = cdf(Normal(x, sigma), x_bins[x_i+1])
+      end
 
-       for (i,x_i) in enumerate(x_idx -N : x_idx + N-1)
-          x_view[i] = x_tmp[i+1]-x_tmp[i]#cdf(Normal(x, sigma), x_bins[x_i+1]) - cdf(Normal(x, sigma), x_bins[x_i]) # duplicated computation
-        end
+      for (i, x_i) in enumerate(x_idx-N:x_idx+N-1)
+        x_view[i] = x_tmp[i+1] - x_tmp[i]
+      end
 
-        for (i,y_i) in enumerate(y_idx -N : y_idx + N)
-          y_tmp[i] = cdf(Normal(y, sigma), y_bins[y_i+1])
-        end
+      for (i, y_i) in enumerate(y_idx-N:y_idx+N)
+        y_tmp[i] = cdf(Normal(y, sigma), y_bins[y_i+1])
+      end
 
-       for (i,y_i) in enumerate(y_idx -N : y_idx + N-1)
-          y_view[i] = y_tmp[i+1]-y_tmp[i]#cdf(Normal(x, sigma), x_bins[x_i+1]) - cdf(Normal(x, sigma), x_bins[x_i]) # duplicated computation
-        end
+      for (i, y_i) in enumerate(y_idx-N:y_idx+N-1)
+        y_view[i] = y_tmp[i+1] - y_tmp[i]
+      end
 
-
-        for (y_v, y_i) in zip(y_view, y_idx -N : y_idx + N-1)
-          for (x_v, x_i) in zip(x_view, x_idx -N : x_idx + N-1)
-            img[x_i, y_i] += x_v * y_v
-          end
+      for (y_v, y_i) in zip(y_view, y_idx-N:y_idx+N-1)
+        for (x_v, x_i) in zip(x_view, x_idx-N:x_idx+N-1)
+          img[x_i, y_i] += x_v * y_v
         end
       end
+    end
   end
   img
 end
 
 
-# x_view = @MVector zeros(2*N)
-# y_view = @MVector zeros(2*N)
-# img = zeros(length(x_bins), length(y_bins))
-# @inbounds for p in points
-#     (x,y) = p
-#     (x_idx, y_idx) = searchsortedfirst(x_bins, x), searchsortedfirst(y_bins, y)
-#     if N < x_idx < length(x_bins) - N && N < y_idx < length(y_bins) - N
-#      for (i,x_i) in enumerate(x_idx -N : x_idx + N-1)
-#         x_view[i] = cdf(Normal(x, sigma), x_bins[x_i+1]) - cdf(Normal(x, sigma), x_bins[x_i]) # duplicated computation
-#       end
-#       for (i,y_i) in enumerate(y_idx -N : y_idx + N-1)
-#         y_view[i] = cdf(Normal(y, sigma), y_bins[y_i+1]) - cdf(Normal(y, sigma), y_bins[y_i]) # duplicated computation
-#       end
-#       for (y_v, y_i) in zip(y_view, y_idx -N : y_idx + N-1)
-#         for (x_v, x_i) in zip(x_view, x_idx -N : x_idx + N-1)
-#           img[x_i, y_i] += x_v * y_v
-#         end
-#       end
-#     end
+# struct KDE
+#   K :: GaussianKernel
+#   T :: FixedRadiusCellList
+#   points :: Vector{SVector{2, Float64}}
 # end
 
+
+@inline function _gauss_inner_product(μ_1, μ_2, σ_1, σ_2)
+  (1/sqrt((σ_1^2 + σ_2^2)*2*π))*exp(-0.5(μ_1-μ_2)^2/(σ_1^2+ σ_2^2))
+end
+
+struct InnerProductAccumulator
+    mul :: Float64
+    μ :: SVector{2,Float64}
+end
+
+@inline function (ip :: InnerProductAccumulator)(x :: SVector{2, Float64}, state :: Float64)
+  d = x - ip.μ
+  state + exp(ip.mul*(d[1]*d[1]+d[2]*d[2]))
+end
+
+function inner_product(K_1 :: KDE, K_2 :: KDE)
+  σ_1 = K_1.K.σ
+  σ_2 = K_2.K.σ
+  if σ_1 > σ_2
+    inner_product(K_2, K_1)
+  else
+    mul = -0.5/(σ_1^2+ σ_2^2)
+    r = 0.0
+    for p in K_2.points
+      r += foldl_range_query(InnerProductAccumulator(mul, p), 0.0, K_1.T, p)
+    end
+    r/((σ_1^2 + σ_2^2)*2*π)
+  end
+end
+
+
+struct GradInnerProductAccumulator
+    mul :: Float64
+    μ :: SVector{2,Float64}
+    o :: SVector{2, Float64}
+end
+
+@inline function (ip :: GradInnerProductAccumulator)(x :: SVector{2, Float64}, (value, gradient) :: Tuple{Float64, SVector{2,Float64}})
+  d = x + ip.o - ip.μ
+  v = exp(ip.mul*(d[1]*d[1]+d[2]*d[2]))
+  (value + v, gradient + ip.mul*v*d)
+end
+
+function inner_product_offset_gradient(K_1::KDE, K_2::KDE, o)
+  σ_1 = K_1.K.σ
+  σ_2 = K_2.K.σ
+  @assert σ_1 ≥ σ_2
+
+  mul = -0.5 / (σ_1^2 + σ_2^2)
+  v = 0.0
+  g = SVector(0.0, 0.0)
+  for p in K_2.points
+    (d_v, d_g) = foldl_range_query(
+      GradInnerProductAccumulator(mul, p, o),
+      (0.0, SVector(0.0, 0.0)),
+      K_1.T,
+      p
+    )
+    v += d_v
+    g += d_g
+  end
+  v / ((σ_1^2 + σ_2^2) * 2 * π), 2*g / ((σ_1^2 + σ_2^2) * 2 * π)
+end
 
 
 end
