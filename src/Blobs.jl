@@ -13,11 +13,11 @@ export inner_product, inner_product_offset_gradient
 @inline _bin_idx(x :: Float64, bin_width :: Float64) = ceil(Int64, x/bin_width)
 
 struct FixedRadiusCellList
-    cells :: IdDict{NTuple{2, Int64}, Vector{SVector{2, Float64}}}
+    cells :: Dict{NTuple{2, Int64}, Vector{SVector{2, Float64}}}
     radius :: Float64
 end
 
-FixedRadiusCellList(r) = FixedRadiusCellList(IdDict{NTuple{2, Int64}, Vector{SVector{2, Float64}}}(), r)
+FixedRadiusCellList(r) = FixedRadiusCellList(Dict{NTuple{2, Int64}, Vector{SVector{2, Float64}}}(), r)
 
 function Base.push!(t :: FixedRadiusCellList, p :: SVector{2, Float64})
     i_x = _bin_idx(p[1], t.radius)
