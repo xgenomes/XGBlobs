@@ -17,7 +17,7 @@ struct FixedRadiusCellList
     radius :: Float64
 end
 
-FixedRadiusCellList(r) = new(IdDict{NTuple{2, Int64}, Vector{SVector{2, Float64}}}(), r)
+FixedRadiusCellList(r) = FixedRadiusCellList(IdDict{NTuple{2, Int64}, Vector{SVector{2, Float64}}}(), r)
 
 function Base.push!(t :: FixedRadiusCellList, p :: SVector{2, Float64})
     i_x = _bin_idx(p[1], t.radius)
