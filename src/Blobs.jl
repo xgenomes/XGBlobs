@@ -1,4 +1,4 @@
-module Blobs
+module XGBlobs
 
 using LinearAlgebra
 using StaticArrays
