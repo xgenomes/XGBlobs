@@ -2,6 +2,7 @@ module XGBlobs
 
 using LinearAlgebra
 using StaticArrays
+using SparseArrays
 using Distributions
 
 # include("psf.jl")
@@ -10,37 +11,48 @@ export GaussianKernel, all_modes, KDE, integrate, render, FixedRadiusCellList
 export inner_product, inner_product_offset_gradient
 
 #### Cell lists. Super simple...
-@inline _bin_idx(x :: Float64, bin_width :: Float64) = ceil(Int64, x/bin_width)
+@inline _bin_idx(x :: Float64, bin_width :: Float64) = ceil(Int64, x/bin_width) + 100000
 
-struct FixedRadiusCellList
-    cells :: Dict{NTuple{2, Int64}, Vector{SVector{2, Float64}}}
+struct FixedRadiusCellList # This code is shared with Drifter, should share
+    cells :: Vector{Vector{SVector{2, Float64}}}
     radius :: Float64
+    indexes :: SparseMatrixCSC{Int, Int}
+    function FixedRadiusCellList(r, maxx, maxy)
+      new(Vector{SVector{2, Float64}}[], r, spzeros(Int, _bin_idx(maxx, r), _bin_idx(maxy, r)))
+  end
 end
-
-FixedRadiusCellList(r) = FixedRadiusCellList(Dict{NTuple{2, Int64}, Vector{SVector{2, Float64}}}(), r)
 
 function Base.push!(t :: FixedRadiusCellList, p :: SVector{2, Float64})
-    i_x = _bin_idx(p[1], t.radius)
-    i_y = _bin_idx(p[2], t.radius)
-    k = (i_x, i_y)
-    list = if k ∉ keys(t.cells)
-        l = SVector{2, Float64}[]
-        t.cells[k] = l
+    k = _bin_idx.(p, t.radius)
+
+    list = if t.indexes[k[1], k[2]] == 0
+        t.indexes[k[1], k[2]] = length(t.cells) + 1
+        push!(t.cells, SVector{2, Float64}[])
+        t.cells[end]
     else
-        t.cells[k]
+        t.cells[t.indexes[k[1], k[2]]]
     end
 
-    push!(t.cells[k], p)
+    push!(list, p)
 end
 
-function FixedRadiusCellList(points :: Vector{SVector{2, Float64}}, radius :: Float64)
-    t = FixedRadiusCellList(radius)
+function FixedRadiusCellList(points :: Vector{SVector{2, Float64}}, radius :: Float64, maxx :: Float64, maxy :: Float64)
+    t = FixedRadiusCellList(radius, maxx, maxy)
     for p in points
         push!(t, p)
     end
     t
 end
 
+function Base.haskey(t :: FixedRadiusCellList, k :: NTuple{2, Int})
+  getindex(t.indexes, k...) > 0
+end
+
+function Base.getindex(t :: FixedRadiusCellList, k :: NTuple{2, Int})
+  t.cells[getindex(t.indexes, k...)]
+end
+
+#############################
 function foldl_range_query(op,init, t :: FixedRadiusCellList, p :: SVector{2, Float64})
     offsets = (-1, 0, 1)
     i_x = _bin_idx(p[1], t.radius)
@@ -49,13 +61,13 @@ function foldl_range_query(op,init, t :: FixedRadiusCellList, p :: SVector{2, Fl
 
     for o_x in offsets, o_y in offsets
         k = (i_x + o_x, i_y + o_y)
-        if k ∈ keys(t.cells)
-            for n in t.cells[k]
-                d = p-n
-                if dot(d,d) <= r_sq
-                    init = op(n,init)
-                end
-            end
+        if haskey(t, k)
+          for n in t[k]
+              d = p .- n
+              if dot(d, d) ≤ r_sq
+                  init = op(n, init)
+              end
+          end
         end
     end
     init
@@ -71,13 +83,13 @@ function has_neighbors(t :: FixedRadiusCellList, p :: SVector{2, Float64}, radiu
 
     for o_x in offsets, o_y in offsets
         k = (i_x + o_x, i_y + o_y)
-        if k ∈ keys(t.cells)
-            for n in t.cells[k]
-                d = p-n
-                if dot(d, d) <= r_sq
-                    return true
-                end
-            end
+        if haskey(t, k)
+          for n in t[k]
+              d = p .- n
+              if dot(d, d) ≤ r_sq
+                  return true
+              end
+          end
         end
     end
     return false
@@ -104,7 +116,7 @@ struct KDE
 end
 
 KDE(σ :: Float64, points :: Vector{SVector{2, Float64}}, radius = 4*σ) =
-  KDE(GaussianKernel(σ), FixedRadiusCellList(points, radius), points)
+  KDE(GaussianKernel(σ), FixedRadiusCellList(points, radius, 100000.0, 100000.0), points)
 
 struct KDEEvaluator
   p :: SVector{2,Float64}
@@ -112,7 +124,7 @@ struct KDEEvaluator
 end
 
 @inline function (s :: KDEEvaluator)(n :: SVector{2, Float64}, state :: Float64)
-  d = n-s.p
+  d = n .- s.p
   state + s.K(0.5*dot(d, d))
 end
 
@@ -126,7 +138,7 @@ struct KDETaylorEvaluator
 end
 
 @inline function (k :: KDETaylorEvaluator)(n, (v, g, H))
-  d = k.p-n
+  d = k.p .- n
   r_sq = 0.5*dot(d, d)
   (K, K_p, K_pp)= taylor(k.K, r_sq)
   (v + K, g + d*K_p, H + K_pp*d*d' + K_p*I)
@@ -161,7 +173,7 @@ end
 
 function all_modes(f :: KDE, min_v, min_peak_radius = f.K.σ,  newton_radius = f.K.σ, iters = 20)
   points = f.points
-  peak_tree = FixedRadiusCellList(SVector{2, Float64}[], min_peak_radius)
+  peak_tree = FixedRadiusCellList(SVector{2, Float64}[], min_peak_radius, 1000000.0, 1000000.0)
   # This is excessive. Can we not skip points near previous points with low function value?
   # Using.. e.g. lipschitz bound on gradient or hessian? or just evaluate on a (fine) grid...? duh?
   for p in points
