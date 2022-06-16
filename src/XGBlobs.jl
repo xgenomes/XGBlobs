@@ -18,10 +18,10 @@ struct FixedRadiusCellList # This code is shared with Drifter, should share, but
     cells :: Vector{Vector{SVector{2, Float64}}}
     radius :: Float64
     indexes :: OffsetMatrix{Int, SparseMatrixCSC{Int, Int}}
-    function FixedRadiusCellList(r, maxx, maxy)
-      _maxx = _bin_idx(maxx, r) * 2
-      _maxy = _bin_idx(maxy, r) * 2
-      new(Vector{SVector{2, Float64}}[], r, OffsetArray(spzeros(Int, _maxx * 2 + 1, _maxy * 2 + 1), -_maxx:_maxx, -_maxy:_maxy))
+    function FixedRadiusCellList(r)
+      maxx = 100000
+      maxy = 100000
+      new(Vector{SVector{2, Float64}}[], r, OffsetArray(spzeros(Int, maxx * 2 + 1, maxy * 2 + 1), -maxx:maxx, -maxy:maxy))
   end
 end
 
@@ -39,8 +39,8 @@ function Base.push!(t :: FixedRadiusCellList, p :: SVector{2, Float64})
     push!(list, p)
 end
 
-function FixedRadiusCellList(points :: Vector{SVector{2, Float64}}, radius :: Float64, maxx :: Float64, maxy :: Float64)
-    t = FixedRadiusCellList(radius, maxx, maxy)
+function FixedRadiusCellList(points :: Vector{SVector{2, Float64}}, radius :: Float64)
+    t = FixedRadiusCellList(radius)
     for p in points
         push!(t, p)
     end
@@ -118,9 +118,7 @@ struct KDE
 end
 
 function KDE(σ :: Float64, points :: Vector{SVector{2, Float64}}, radius = 4*σ)
-  maxx = maximum(abs(p[1]) for p ∈ points)
-  maxy = maximum(abs(p[2]) for p ∈ points)
-  KDE(GaussianKernel(σ), FixedRadiusCellList(points, radius, maxx, maxy), points)
+  KDE(GaussianKernel(σ), FixedRadiusCellList(points, radius), points)
 end
 
 struct KDEEvaluator
@@ -178,9 +176,7 @@ end
 
 function all_modes(f :: KDE, min_v, min_peak_radius = f.K.σ,  newton_radius = f.K.σ, iters = 20)
   points = f.points
-  maxx = maximum(abs(p[1]) for p ∈ points)
-  maxy = maximum(abs(p[2]) for p ∈ points)
-  peak_tree = FixedRadiusCellList(SVector{2, Float64}[], min_peak_radius, maxx, maxy)
+  peak_tree = FixedRadiusCellList(SVector{2, Float64}[], min_peak_radius)
   # This is excessive. Can we not skip points near previous points with low function value?
   # Using.. e.g. lipschitz bound on gradient or hessian? or just evaluate on a (fine) grid...? duh?
   for p in points
