@@ -1,6 +1,7 @@
 module XGBlobs
 
 using LinearAlgebra
+using OffsetArrays
 using StaticArrays
 using SparseArrays
 using Distributions
