@@ -19,9 +19,9 @@ struct FixedRadiusCellList # This code is shared with Drifter, should share, but
     radius :: Float64
     indexes :: OffsetMatrix{Int, SparseMatrixCSC{Int, Int}}
     function FixedRadiusCellList(r, maxx, maxy)
-      _maxx = _bin_idx(maxx, r) * 2
-      _maxy = _bin_idx(maxy, r) * 2
-      new(Vector{SVector{2, Float64}}[], r, OffsetArray(spzeros(Int, _maxx * 2 + 1, _maxy * 2 + 1), -maxx:maxx, -maxy:maxy))
+      _maxx = _bin_idx(maxx, r)
+      _maxy = _bin_idx(maxy, r)
+      new(Vector{SVector{2, Float64}}[], r, OffsetArray(spzeros(Int, _maxx * 2 + 1, _maxy * 2 + 1), -_maxx:_maxx, -_maxy:_maxy))
   end
 end
 
