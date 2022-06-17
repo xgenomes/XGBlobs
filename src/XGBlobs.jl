@@ -14,24 +14,32 @@ export inner_product, inner_product_offset_gradient
 #### Cell lists. Super simple...
 @inline _bin_idx(x :: Float64, bin_width :: Float64) = ceil(Int64, x/bin_width)
 
-struct FixedRadiusCellList # This code is shared with Drifter, should share, but use the OffsetArray version
+struct FixedRadiusCellList
+  
+  # This code is shared with Drifter, should share, but use the OffsetArray version
+  # EXCEPT this version is slower! I think perhaps the cell array is divided too finely?
+  # such that most points are essentially in their own column, so adding each point always
+  # creates a column.
     cells :: Vector{Vector{SVector{2, Float64}}}
     radius :: Float64
     indexes :: OffsetMatrix{Int, SparseMatrixCSC{Int, Int}}
     function FixedRadiusCellList(r)
-      maxx = 10000000
-      maxy = 10000000
+      maxx = 1000000
+      maxy = 1000000
       new(Vector{SVector{2, Float64}}[], r, OffsetArray(spzeros(Int, maxx * 2 + 1, maxy * 2 + 1), -maxx:maxx, -maxy:maxy))
   end
 end
 
 function Base.push!(t :: FixedRadiusCellList, p :: SVector{2, Float64})
     k = _bin_idx.(p, t.radius)
-
+    global maxval = max(max(k[1], k[2]), maxval)
+    global counter += 1
+    println(k)
     list = if t.indexes[k[1], k[2]] == 0
         t.indexes[k[1], k[2]] = length(t.cells) + 1
-        push!(t.cells, SVector{2, Float64}[])
-        t.cells[end]
+        l = SVector{2, Float64}[]
+        push!(t.cells, l)
+        l
     else
         t.cells[t.indexes[k[1], k[2]]]
     end
@@ -39,8 +47,11 @@ function Base.push!(t :: FixedRadiusCellList, p :: SVector{2, Float64})
     push!(list, p)
 end
 
+
+
 function FixedRadiusCellList(points :: Vector{SVector{2, Float64}}, radius :: Float64)
     t = FixedRadiusCellList(radius)
+    println(length(points))
     for p in points
         push!(t, p)
     end
@@ -65,7 +76,7 @@ function foldl_range_query(op,init, t :: FixedRadiusCellList, p :: SVector{2, Fl
         k = (i_x + o_x, i_y + o_y)
         if haskey(t, k)
           for n in t[k]
-              d = p .- n
+              d = p - n
               if dot(d, d) ≤ r_sq
                   init = op(n, init)
               end
@@ -87,7 +98,7 @@ function has_neighbors(t :: FixedRadiusCellList, p :: SVector{2, Float64}, radiu
         k = (i_x + o_x, i_y + o_y)
         if haskey(t, k)
           for n in t[k]
-              d = p .- n
+              d = p - n
               if dot(d, d) ≤ r_sq
                   return true
               end
@@ -127,7 +138,7 @@ struct KDEEvaluator
 end
 
 @inline function (s :: KDEEvaluator)(n :: SVector{2, Float64}, state :: Float64)
-  d = n .- s.p
+  d = n - s.p
   state + s.K(0.5*dot(d, d))
 end
 
@@ -141,7 +152,7 @@ struct KDETaylorEvaluator
 end
 
 @inline function (k :: KDETaylorEvaluator)(n, (v, g, H))
-  d = k.p .- n
+  d = k.p - n
   r_sq = 0.5*dot(d, d)
   (K, K_p, K_pp)= taylor(k.K, r_sq)
   (v + K, g + d*K_p, H + K_pp*d*d' + K_p*I)
