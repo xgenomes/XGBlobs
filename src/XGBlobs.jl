@@ -3,6 +3,7 @@ module XGBlobs
 using LinearAlgebra
 using StaticArrays
 using Distributions
+using NearestNeighbors
 
 # include("psf.jl")
 
