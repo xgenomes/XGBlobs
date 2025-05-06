@@ -160,7 +160,12 @@ function _newton(ρ :: KDE, x, radius, max_iters, min_v)
 end
 
 function all_modes(f :: KDE, min_v, min_peak_radius = f.K.σ,  newton_radius = f.K.σ, iters = 20)
-  points = f.points
+  # sort points by their local density so that dense clusters are assigned first,
+  # avoiding an issue where a small peak might be assigned first and crowd out a more important peak
+  tree = KDTree(f.points)
+  neighborcount = inrangecount(tree, f.points, min_peak_radius)
+  points = f.points[sortperm(neighborcount; rev = true)]
+
   peak_tree = FixedRadiusCellList(SVector{2, Float64}[], min_peak_radius)
   # This is excessive. Can we not skip points near previous points with low function value?
   # Using.. e.g. lipschitz bound on gradient or hessian? or just evaluate on a (fine) grid...? duh?
